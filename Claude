@@ -1,0 +1,724 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+
+// =============================================================================
+//  Grocery Barcode Hashtable Comparison
+//  Separate Chaining  vs  Linear Probing
+// =============================================================================
+
+namespace GroceryHashtables
+{
+    // =========================================================================
+    //  Product record stored in both hashtables
+    // =========================================================================
+    public class Product
+    {
+        public string Barcode { get; init; }
+        public string Name { get; init; }
+        public decimal Price { get; init; }
+
+        public Product(string barcode, string name, decimal price)
+        {
+            Barcode = barcode;
+            Name = name;
+            Price = price;
+        }
+
+        public override string ToString() =>
+            $"{Name,-38} | {Barcode} | ${Price:F2}";
+    }
+
+    // =========================================================================
+    //  Lookup result — returned by both hashtable types
+    // =========================================================================
+    public class LookupResult
+    {
+        public bool Found { get; init; }
+        public Product? Item { get; init; }
+        public int Comparisons { get; init; }   // number of key comparisons
+        public long ElapsedNs { get; init; }
+        public List<string> Steps { get; init; } = new();
+
+        public override string ToString()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine(Found
+                ? $"  ✓ FOUND  : {Item}"
+                : "  ✗ NOT FOUND");
+            sb.AppendLine($"  Comparisons : {Comparisons}");
+            sb.AppendLine($"  Elapsed     : {ElapsedNs} ns");
+            foreach (var s in Steps) sb.AppendLine($"    {s}");
+            return sb.ToString();
+        }
+    }
+
+    // =========================================================================
+    //  HASHTABLE 1 — Separate Chaining
+    //  Each bucket is a linked list (List<Product>).
+    //  Collisions simply append to the chain — the table never fills up.
+    //
+    //  Avg comparisons (successful)   ≈ 1 + λ/2
+    //  Avg comparisons (unsuccessful) ≈ λ          where λ = n / capacity
+    // =========================================================================
+    public class SeparateChainingHashTable
+    {
+        private readonly List<Product>[] _buckets;
+        private int _count;
+
+        public int Capacity => _buckets.Length;
+        public int Count => _count;
+        public double LoadFactor => (double)_count / Capacity;
+
+        public SeparateChainingHashTable(int capacity)
+        {
+            if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity));
+            _buckets = new List<Product>[capacity];
+            for (int i = 0; i < capacity; i++)
+                _buckets[i] = new List<Product>();
+        }
+
+        // Polynomial rolling hash on the barcode string
+        private int Hash(string barcode)
+        {
+            unchecked
+            {
+                int h = 0;
+                foreach (char c in barcode)
+                    h = h * 31 + c;
+                return Math.Abs(h) % Capacity;
+            }
+        }
+
+        // ── Insert ──────────────────────────────────────────────────────────
+        public void Insert(Product product)
+        {
+            int idx = Hash(product.Barcode);
+            // Replace if barcode already exists
+            for (int i = 0; i < _buckets[idx].Count; i++)
+            {
+                if (_buckets[idx][i].Barcode == product.Barcode)
+                {
+                    _buckets[idx][i] = product;
+                    return;
+                }
+            }
+            _buckets[idx].Add(product);
+            _count++;
+        }
+
+        // ── Lookup ──────────────────────────────────────────────────────────
+        public LookupResult Lookup(string barcode)
+        {
+            var sw = Stopwatch.StartNew();
+            int idx = Hash(barcode);
+            var chain = _buckets[idx];
+            var steps = new List<string>();
+            int compares = 0;
+
+            steps.Add($"Hash(\"{barcode}\") → bucket {idx}  (chain length = {chain.Count})");
+
+            for (int i = 0; i < chain.Count; i++)
+            {
+                compares++;
+                if (chain[i].Barcode == barcode)
+                {
+                    sw.Stop();
+                    steps.Add($"  [{i}] {chain[i].Barcode} → MATCH ✓");
+                    return new LookupResult
+                    {
+                        Found = true,
+                        Item = chain[i],
+                        Comparisons = compares,
+                        ElapsedNs = sw.ElapsedTicks * 1_000_000_000L / Stopwatch.Frequency,
+                        Steps = steps
+                    };
+                }
+                steps.Add($"  [{i}] {chain[i].Barcode} → no match");
+            }
+
+            sw.Stop();
+            steps.Add(chain.Count == 0 ? "  Bucket empty → NOT FOUND" : "  End of chain → NOT FOUND");
+            return new LookupResult
+            {
+                Found = false,
+                Comparisons = compares,
+                ElapsedNs = sw.ElapsedTicks * 1_000_000_000L / Stopwatch.Frequency,
+                Steps = steps
+            };
+        }
+
+        // ── Delete ──────────────────────────────────────────────────────────
+        public bool Delete(string barcode)
+        {
+            int idx = Hash(barcode);
+            var chain = _buckets[idx];
+            for (int i = 0; i < chain.Count; i++)
+            {
+                if (chain[i].Barcode == barcode)
+                {
+                    chain.RemoveAt(i);
+                    _count--;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // ── Diagnostics ─────────────────────────────────────────────────────
+        public HashTableStats GetStats()
+        {
+            int maxChain = _buckets.Max(b => b.Count);
+            int empties = _buckets.Count(b => b.Count == 0);
+            int collisions = _buckets.Sum(b => Math.Max(0, b.Count - 1));
+            double avgChain = _count == 0 ? 0 : (double)_count / _buckets.Count(b => b.Count > 0);
+
+            return new HashTableStats
+            {
+                Type = "Separate Chaining",
+                Capacity = Capacity,
+                Count = _count,
+                LoadFactor = LoadFactor,
+                EmptySlots = empties,
+                Collisions = collisions,
+                MaxCluster = maxChain,
+                AvgChainLength = Math.Round(avgChain, 2),
+                TheoreticalAvgProbesFound = Math.Round(1 + LoadFactor / 2.0, 3),
+                TheoreticalAvgProbesMiss = Math.Round(LoadFactor, 3)
+            };
+        }
+
+        public void PrintBuckets(int maxBuckets = 20)
+        {
+            Console.WriteLine($"\n  {"IDX",-5} {"CHAIN CONTENTS",-60} {"LEN",-4}");
+            Console.WriteLine($"  {new string('─', 72)}");
+            int shown = Math.Min(Capacity, maxBuckets);
+            for (int i = 0; i < shown; i++)
+            {
+                var items = _buckets[i].Select(p => p.Barcode[^6..]);
+                string content = _buckets[i].Count == 0
+                    ? "(empty)"
+                    : string.Join(" → ", items);
+                Console.WriteLine($"  [{i,3}]  {content,-60} {_buckets[i].Count}");
+            }
+            if (shown < Capacity)
+                Console.WriteLine($"  ... ({Capacity - shown} more buckets not shown)");
+        }
+    }
+
+    // =========================================================================
+    //  HASHTABLE 2 — Linear Probing (Open Addressing)
+    //  All entries live in a flat array. On collision, step forward +1 until
+    //  an empty slot. Deletions use a DELETED tombstone to keep probe chains intact.
+    //
+    //  Avg comparisons (successful)   ≈ ½ · (1 + 1/(1−λ))
+    //  Avg comparisons (unsuccessful) ≈ ½ · (1 + 1/(1−λ)²)
+    // =========================================================================
+    public class LinearProbingHashTable
+    {
+        private enum SlotState { Empty, Occupied, Deleted }
+
+        private readonly Product?[] _items;
+        private readonly SlotState[] _states;
+        private int _count;
+
+        public int Capacity => _items.Length;
+        public int Count => _count;
+        public double LoadFactor => (double)_count / Capacity;
+
+        public LinearProbingHashTable(int capacity)
+        {
+            if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity));
+            _items = new Product?[capacity];
+            _states = new SlotState[capacity];
+            Array.Fill(_states, SlotState.Empty);
+        }
+
+        private int Hash(string barcode)
+        {
+            unchecked
+            {
+                int h = 0;
+                foreach (char c in barcode)
+                    h = h * 31 + c;
+                return Math.Abs(h) % Capacity;
+            }
+        }
+
+        // ── Insert ──────────────────────────────────────────────────────────
+        public bool Insert(Product product)
+        {
+            if (_count >= Capacity)
+                throw new InvalidOperationException("Table is full — linear probing requires capacity > n.");
+
+            int idx = Hash(product.Barcode);
+            int firstDel = -1;
+
+            for (int i = 0; i < Capacity; i++)
+            {
+                int slot = (idx + i) % Capacity;
+                if (_states[slot] == SlotState.Occupied && _items[slot]!.Barcode == product.Barcode)
+                {
+                    _items[slot] = product; // update
+                    return true;
+                }
+                if (_states[slot] == SlotState.Deleted && firstDel == -1)
+                    firstDel = slot;
+                if (_states[slot] == SlotState.Empty)
+                {
+                    int target = firstDel != -1 ? firstDel : slot;
+                    _items[target] = product;
+                    _states[target] = SlotState.Occupied;
+                    _count++;
+                    return true;
+                }
+            }
+
+            // All slots visited — use first deleted slot if found
+            if (firstDel != -1)
+            {
+                _items[firstDel] = product;
+                _states[firstDel] = SlotState.Occupied;
+                _count++;
+                return true;
+            }
+            return false;
+        }
+
+        // ── Lookup ──────────────────────────────────────────────────────────
+        public LookupResult Lookup(string barcode)
+        {
+            var sw = Stopwatch.StartNew();
+            int start = Hash(barcode);
+            var steps = new List<string>();
+            int compares = 0;
+
+            steps.Add($"Hash(\"{barcode}\") → slot {start}");
+
+            for (int i = 0; i < Capacity; i++)
+            {
+                int slot = (start + i) % Capacity;
+
+                if (_states[slot] == SlotState.Empty)
+                {
+                    sw.Stop();
+                    steps.Add($"  Slot {slot,3}: EMPTY → stop (not in table)");
+                    return new LookupResult
+                    {
+                        Found = false,
+                        Comparisons = compares,
+                        ElapsedNs = sw.ElapsedTicks * 1_000_000_000L / Stopwatch.Frequency,
+                        Steps = steps
+                    };
+                }
+
+                if (_states[slot] == SlotState.Deleted)
+                {
+                    steps.Add($"  Slot {slot,3}: TOMBSTONE → skip, keep probing");
+                    continue;
+                }
+
+                // Occupied
+                compares++;
+                if (_items[slot]!.Barcode == barcode)
+                {
+                    sw.Stop();
+                    steps.Add($"  Slot {slot,3}: {_items[slot]!.Barcode} → MATCH ✓  (displaced +{i})");
+                    return new LookupResult
+                    {
+                        Found = true,
+                        Item = _items[slot],
+                        Comparisons = compares,
+                        ElapsedNs = sw.ElapsedTicks * 1_000_000_000L / Stopwatch.Frequency,
+                        Steps = steps
+                    };
+                }
+
+                steps.Add($"  Slot {slot,3}: {_items[slot]!.Barcode} → no match, probe +{i + 1}");
+            }
+
+            sw.Stop();
+            steps.Add("  Full table scanned → NOT FOUND");
+            return new LookupResult
+            {
+                Found = false,
+                Comparisons = compares,
+                ElapsedNs = sw.ElapsedTicks * 1_000_000_000L / Stopwatch.Frequency,
+                Steps = steps
+            };
+        }
+
+        // ── Delete (tombstone) ───────────────────────────────────────────────
+        public bool Delete(string barcode)
+        {
+            int start = Hash(barcode);
+            for (int i = 0; i < Capacity; i++)
+            {
+                int slot = (start + i) % Capacity;
+                if (_states[slot] == SlotState.Empty) return false;
+                if (_states[slot] == SlotState.Occupied && _items[slot]!.Barcode == barcode)
+                {
+                    _states[slot] = SlotState.Deleted;
+                    _items[slot] = null;
+                    _count--;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // ── Diagnostics ─────────────────────────────────────────────────────
+        public HashTableStats GetStats()
+        {
+            int maxCluster = 0, curCluster = 0, displaced = 0, empties = 0;
+            for (int i = 0; i < Capacity; i++)
+            {
+                if (_states[i] == SlotState.Occupied)
+                {
+                    curCluster++;
+                    int home = Hash(_items[i]!.Barcode);
+                    if (home != i) displaced++;
+                    maxCluster = Math.Max(maxCluster, curCluster);
+                }
+                else
+                {
+                    if (_states[i] == SlotState.Empty) empties++;
+                    curCluster = 0;
+                }
+            }
+
+            double lf = LoadFactor;
+            double tFound = lf < 1 ? 0.5 * (1 + 1.0 / (1 - lf)) : double.PositiveInfinity;
+            double tMiss = lf < 1 ? 0.5 * (1 + 1.0 / Math.Pow(1 - lf, 2)) : double.PositiveInfinity;
+
+            return new HashTableStats
+            {
+                Type = "Linear Probing",
+                Capacity = Capacity,
+                Count = _count,
+                LoadFactor = lf,
+                EmptySlots = empties,
+                Collisions = displaced,
+                MaxCluster = maxCluster,
+                AvgChainLength = 0,
+                TheoreticalAvgProbesFound = Math.Round(tFound, 3),
+                TheoreticalAvgProbesMiss = Math.Round(tMiss, 3)
+            };
+        }
+
+        public void PrintSlots(int maxSlots = 20)
+        {
+            Console.WriteLine($"\n  {"IDX",-5} {"STATE",-10} {"BARCODE",-15} {"HOME",-6} {"DISP",-5} PRODUCT");
+            Console.WriteLine($"  {new string('─', 80)}");
+            int shown = Math.Min(Capacity, maxSlots);
+            for (int i = 0; i < shown; i++)
+            {
+                string state = _states[i] switch
+                {
+                    SlotState.Empty => "EMPTY",
+                    SlotState.Deleted => "DELETED",
+                    SlotState.Occupied => "OCCUPIED",
+                    _ => "?"
+                };
+                if (_states[i] == SlotState.Occupied)
+                {
+                    int home = Hash(_items[i]!.Barcode);
+                    int disp = (i - home + Capacity) % Capacity;
+                    Console.WriteLine($"  [{i,3}]  {state,-10} {_items[i]!.Barcode,-15} {home,5}  +{disp,-4} {_items[i]!.Name}");
+                }
+                else
+                    Console.WriteLine($"  [{i,3}]  {state,-10}");
+            }
+            if (shown < Capacity)
+                Console.WriteLine($"  ... ({Capacity - shown} more slots not shown)");
+        }
+    }
+
+    // =========================================================================
+    //  Stats DTO
+    // =========================================================================
+    public class HashTableStats
+    {
+        public string Type { get; init; } = "";
+        public int Capacity { get; init; }
+        public int Count { get; init; }
+        public double LoadFactor { get; init; }
+        public int EmptySlots { get; init; }
+        public int Collisions { get; init; }
+        public int MaxCluster { get; init; }
+        public double AvgChainLength { get; init; }
+        public double TheoreticalAvgProbesFound { get; init; }
+        public double TheoreticalAvgProbesMiss { get; init; }
+
+        public void Print()
+        {
+            Console.WriteLine($"  Type                        : {Type}");
+            Console.WriteLine($"  Capacity                    : {Capacity}");
+            Console.WriteLine($"  Items stored                : {Count}");
+            Console.WriteLine($"  Load factor (λ = n/cap)     : {LoadFactor:F3}");
+            Console.WriteLine($"  Empty slots                 : {EmptySlots}");
+            Console.WriteLine($"  Collisions / Displaced      : {Collisions}");
+            Console.WriteLine($"  Max cluster / chain length  : {MaxCluster}");
+            Console.WriteLine($"  Theoretical avg probes (hit): {TheoreticalAvgProbesFound}");
+            Console.WriteLine($"  Theoretical avg probes (miss): {TheoreticalAvgProbesMiss}");
+        }
+    }
+
+    // =========================================================================
+    //  Benchmark helper — runs many lookups and measures average comparisons
+    // =========================================================================
+    public static class Benchmark
+    {
+        public static void Run(
+            SeparateChainingHashTable chain,
+            LinearProbingHashTable probe,
+            List<Product> knownItems,
+            List<string> missingBarcodes,
+            int trials = 500)
+        {
+            Console.WriteLine($"\n{'═',1}{'═' + new string('═', 75)}");
+            Console.WriteLine("  BENCHMARK — Average comparisons over {0} trials", trials);
+            Console.WriteLine($"  {'═' + new string('═', 75)}");
+
+            // Successful lookups
+            double chainHitTotal = 0, probeHitTotal = 0;
+            for (int t = 0; t < trials; t++)
+            {
+                var item = knownItems[t % knownItems.Count];
+                chainHitTotal += chain.Lookup(item.Barcode).Comparisons;
+                probeHitTotal += probe.Lookup(item.Barcode).Comparisons;
+            }
+
+            // Unsuccessful lookups
+            double chainMissTotal = 0, probeMissTotal = 0;
+            for (int t = 0; t < trials; t++)
+            {
+                var bc = missingBarcodes[t % missingBarcodes.Count];
+                chainMissTotal += chain.Lookup(bc).Comparisons;
+                probeMissTotal += probe.Lookup(bc).Comparisons;
+            }
+
+            double lf = chain.LoadFactor;
+
+            Console.WriteLine($"\n  {"METRIC",-38} {"CHAINING",12} {"PROBING",12}");
+            Console.WriteLine($"  {new string('─', 64)}");
+            Console.WriteLine($"  {"Load factor (λ)",-38} {lf,12:F3} {lf,12:F3}");
+            Console.WriteLine($"  {"Measured avg comparisons (found)",-38} {chainHitTotal / trials,12:F3} {probeHitTotal / trials,12:F3}");
+            Console.WriteLine($"  {"Measured avg comparisons (miss)",-38} {chainMissTotal / trials,12:F3} {probeMissTotal / trials,12:F3}");
+            Console.WriteLine($"  {"Theoretical avg probes (found)",-38} {chain.GetStats().TheoreticalAvgProbesFound,12:F3} {probe.GetStats().TheoreticalAvgProbesFound,12:F3}");
+            Console.WriteLine($"  {"Theoretical avg probes (miss)",-38} {chain.GetStats().TheoreticalAvgProbesMiss,12:F3} {probe.GetStats().TheoreticalAvgProbesMiss,12:F3}");
+        }
+
+        // Sweep multiple load factors and print a table
+        public static void LoadFactorSweep(List<Product> allProducts)
+        {
+            Console.WriteLine($"\n{'═',1}{'═' + new string('═', 79)}");
+            Console.WriteLine("  LOAD FACTOR SWEEP — Theoretical avg comparisons");
+            Console.WriteLine($"  {'═' + new string('═', 79)}");
+            Console.WriteLine($"\n  {"λ",6}  {"Chaining Found",16} {"Chaining Miss",14} {"Probing Found",14} {"Probing Miss",13}");
+            Console.WriteLine($"  {new string('─', 68)}");
+
+            double[] lfs = { 0.10, 0.25, 0.40, 0.50, 0.60, 0.70, 0.75, 0.80, 0.90, 0.95 };
+            foreach (double lf in lfs)
+            {
+                double cFound = 1 + lf / 2.0;
+                double cMiss = lf;
+                double pFound = 0.5 * (1 + 1.0 / (1 - lf));
+                double pMiss = 0.5 * (1 + 1.0 / Math.Pow(1 - lf, 2));
+                string warning = lf >= 0.75 ? "  ⚠" : "";
+                Console.WriteLine($"  {lf,6:F2}  {cFound,16:F3} {cMiss,14:F3} {pFound,14:F3} {pMiss,13:F3}{warning}");
+            }
+            Console.WriteLine("\n  ⚠ = load factor where performance degrades noticeably for linear probing");
+        }
+    }
+
+    // =========================================================================
+    //  Entry Point
+    // =========================================================================
+    class Program
+    {
+        // Grocery product catalogue (barcode, name, price)
+        static readonly List<(string bc, string name, decimal price)> Catalogue = new()
+        {
+            ("049000042566", "Coca-Cola 2L",                  2.49m),
+            ("028400090759", "Lay's Classic Chips",           4.29m),
+            ("038000845703", "Special K Cereal",              5.49m),
+            ("016000275690", "Cheerios",                      4.99m),
+            ("021130126026", "Wonder Bread",                  3.29m),
+            ("041000027000", "Campbell's Tomato Soup",        1.89m),
+            ("051000024466", "Kraft Mac & Cheese",            1.49m),
+            ("044000031015", "Oreos",                         4.79m),
+            ("078742030890", "Great Value Whole Milk",        3.49m),
+            ("070038610038", "Quaker Old Fashioned Oats",     4.19m),
+            ("034000402908", "Pepsi 2L",                      2.39m),
+            ("036000291452", "Tropicana Orange Juice",        4.59m),
+            ("025317010059", "Bounty Paper Towels 6pk",       8.99m),
+            ("037000869726", "Tide Pods 42ct",               12.99m),
+            ("075450093704", "Heinz Tomato Ketchup",          3.29m),
+            ("013562100858", "French's Classic Mustard",      2.19m),
+            ("014100043829", "Hellmann's Real Mayo",          5.49m),
+            ("045000012209", "Jif Creamy Peanut Butter",      4.29m),
+            ("432674892017", "Smucker's Strawberry Jam",      3.79m),
+            ("011110906182", "Minute Rice White 72oz",        2.99m),
+            ("041196890219", "Barilla Spaghetti 16oz",        1.99m),
+            ("765667101007", "Prego Marinara Sauce",          2.89m),
+            ("070560000807", "Hunt's Diced Tomatoes",         1.29m),
+            ("019600004882", "Progresso Chicken Soup",        2.49m),
+            ("030000056783", "Nature Valley Oats & Honey",    4.99m),
+            ("016000275683", "Lucky Charms",                  4.89m),
+            ("038000138690", "Frosted Flakes",                4.49m),
+            ("030100154427", "Wheat Thins Original",          4.19m),
+            ("024000163237", "Green Giant Corn",              1.19m),
+            ("037100029556", "Del Monte Sliced Peaches",      1.69m),
+            ("073214004737", "Bush's Original Baked Beans",   1.89m),
+            ("884912129154", "Folgers Classic Roast Coffee",  9.99m),
+            ("012000001215", "Poland Spring Water 20oz",      1.09m),
+            ("064144902810", "Snapple Lemon Tea",             1.79m),
+            ("012000161155", "Gatorade Fruit Punch 32oz",     1.99m),
+            ("041270029780", "Vitamin Water XXX",             1.69m),
+            ("052200003008", "Pop-Tarts Strawberry 8ct",      3.49m),
+            ("016000441101", "Fiber One Chewy Bar 5ct",       5.29m),
+            ("010700503709", "KIND Dark Chocolate Nuts Bar",  1.99m),
+            ("080868003700", "Annie's Shells & White Cheddar",2.49m),
+            ("015400891424", "Amy's Organic Chili",           3.49m),
+            ("744473000306", "RXBAR Chocolate Sea Salt",      2.99m),
+            ("076840048018", "Larabar Cashew Cookie",         1.69m),
+            ("022000012403", "Sabra Classic Hummus 10oz",     4.99m),
+            ("078742062198", "Great Value 100% OJ 52oz",      3.79m),
+            ("075450891751", "Heinz Real Mayonnaise",         4.49m),
+            ("022506001105", "Stonyfield Organic Yogurt",     1.49m),
+            ("036632035981", "Chobani Plain Greek Yogurt",    1.29m),
+            ("041303022009", "Silk Unsweetened Almond Milk",  3.99m),
+            ("025317026777", "Bounty Select-A-Size 8pk",     11.99m),
+            ("037000865452", "Tide Original Liquid 92oz",    10.99m),
+            ("023400099992", "Windex Glass Cleaner 26oz",     4.29m),
+            ("054500018635", "Colgate Total Toothpaste",      3.49m),
+            ("035000521200", "Crest 3D White Toothpaste",     4.79m),
+            ("300410012345", "Dove Beauty Bar Soap 3pk",      5.49m),
+            ("191567200011", "Gillette Mach3 Razor",         10.49m),
+        };
+
+        static void Header(string text)
+        {
+            Console.WriteLine($"\n{'═',1}{'═' + new string('═', 79)}");
+            Console.WriteLine($"  {text}");
+            Console.WriteLine($"  {'═' + new string('═', 79)}");
+        }
+
+        static void Main(string[] args)
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+            Console.ForegroundColor = ConsoleColor.White;
+
+            Console.WriteLine();
+            Console.WriteLine("  ╔══════════════════════════════════════════════════════════════════════╗");
+            Console.WriteLine("  ║     GROCERY BARCODE HASHTABLE COMPARISON                             ║");
+            Console.WriteLine("  ║     Separate Chaining  vs  Linear Probing                            ║");
+            Console.WriteLine("  ╚══════════════════════════════════════════════════════════════════════╝");
+
+            // ── Scenario 1: Small corner store (low load factor) ──────────────
+            RunScenario(
+                label: "SCENARIO 1 — Small Corner Store (capacity=32, items=14, λ≈0.44)",
+                capacity: 32,
+                itemCount: 14,
+                lookupBarcodes: new[] { "049000042566", "044000031015", "999999999999" }
+            );
+
+            // ── Scenario 2: Mid-size supermarket (moderate load factor) ────────
+            RunScenario(
+                label: "SCENARIO 2 — Mid-Size Supermarket (capacity=64, items=40, λ≈0.63)",
+                capacity: 64,
+                itemCount: 40,
+                lookupBarcodes: new[] { "036632035981", "070038610038", "111111111111" }
+            );
+
+            // ── Scenario 3: Big-box warehouse (high load factor) ───────────────
+            RunScenario(
+                label: "SCENARIO 3 — Big-Box Warehouse (capacity=64, items=54, λ≈0.84)",
+                capacity: 64,
+                itemCount: 54,
+                lookupBarcodes: new[] { "191567200011", "012000001215", "000000000000" }
+            );
+
+            // ── Load factor sweep ─────────────────────────────────────────────
+            var allProducts = Catalogue
+                .Select(c => new Product(c.bc, c.name, c.price))
+                .ToList();
+            Benchmark.LoadFactorSweep(allProducts);
+
+            Console.WriteLine("\n\n  Done. Press any key to exit.");
+            Console.ReadKey();
+        }
+
+        static void RunScenario(
+            string label,
+            int capacity,
+            int itemCount,
+            string[] lookupBarcodes)
+        {
+            Header(label);
+
+            var products = Catalogue
+                .Take(itemCount)
+                .Select(c => new Product(c.bc, c.name, c.price))
+                .ToList();
+
+            var missing = new List<string> { "999999999999", "111111111111", "000000000000" };
+
+            // Build both tables
+            var chain = new SeparateChainingHashTable(capacity);
+            var probe = new LinearProbingHashTable(capacity);
+            foreach (var p in products)
+            {
+                chain.Insert(p);
+                probe.Insert(p);
+            }
+
+            // Print stats
+            Console.WriteLine("\n  ── Separate Chaining Stats ─────────────────────────────────");
+            chain.GetStats().Print();
+            Console.WriteLine("\n  ── Linear Probing Stats ────────────────────────────────────");
+            probe.GetStats().Print();
+
+            // Print first 20 buckets / slots
+            Console.WriteLine("\n  ── Chaining Buckets (first 20) ─────────────────────────────");
+            chain.PrintBuckets(20);
+            Console.WriteLine("\n  ── Probing Slots (first 20) ────────────────────────────────");
+            probe.PrintSlots(20);
+
+            // Demonstrate individual lookups
+            Console.WriteLine("\n  ── Barcode Lookups ─────────────────────────────────────────");
+            foreach (var bc in lookupBarcodes)
+            {
+                Console.WriteLine($"\n  Scanning barcode: {bc}");
+                Console.WriteLine("  [Separate Chaining]");
+                var cr = chain.Lookup(bc);
+                Console.Write(cr.ToString());
+                Console.WriteLine("  [Linear Probing]");
+                var pr = probe.Lookup(bc);
+                Console.Write(pr.ToString());
+            }
+
+            // Benchmark
+            Benchmark.Run(chain, probe, products, missing, trials: 500);
+
+            // Demonstrate delete + re-lookup (probing tombstone test)
+            if (products.Count > 0)
+            {
+                var target = products[products.Count / 2];
+                Console.WriteLine($"\n  ── Delete Test: remove \"{target.Name}\" ({target.Barcode}) ──");
+                bool cd = chain.Delete(target.Barcode);
+                bool pd = probe.Delete(target.Barcode);
+                Console.WriteLine($"  Chaining delete success : {cd}");
+                Console.WriteLine($"  Probing  delete success : {pd}");
+                Console.WriteLine("  Re-lookup after delete:");
+                var cr2 = chain.Lookup(target.Barcode);
+                var pr2 = probe.Lookup(target.Barcode);
+                Console.WriteLine($"  Chaining → Found: {cr2.Found}  ({cr2.Comparisons} comparisons)");
+                Console.WriteLine($"  Probing  → Found: {pr2.Found}  ({pr2.Comparisons} comparisons)");
+            }
+        }
+    }
+}
