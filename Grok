@@ -1,0 +1,242 @@
+using System;
+using System.Collections.Generic;
+
+namespace GroceryBarcodeHashTables
+{
+    // Simple product record (what we store for each barcode)
+    public class Product
+    {
+        public string Name { get; }
+        public decimal Price { get; }
+        public int Stock { get; set; }
+
+        public Product(string name, decimal price, int stock)
+        {
+            Name = name;
+            Price = price;
+            Stock = stock;
+        }
+
+        public override string ToString() => $"{Name,-20} ${Price:F2}  (stock: {Stock})";
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // 1. Separate Chaining Hash Table
+    // ───────────────────────────────────────────────────────────────
+    public class SeparateChainingHashTable
+    {
+        private readonly List<KeyValuePair<string, Product>>[] _buckets;
+        private readonly int _capacity;
+
+        public SeparateChainingHashTable(int capacity = 16384) // ~2^14, good starting size
+        {
+            _capacity = capacity;
+            _buckets = new List<KeyValuePair<string, Product>>[capacity];
+            for (int i = 0; i < capacity; i++)
+                _buckets[i] = new List<KeyValuePair<string, Product>>(2); // small initial capacity
+        }
+
+        public void Add(string barcode, Product product)
+        {
+            int index = GetIndex(barcode);
+
+            var chain = _buckets[index];
+            for (int i = 0; i < chain.Count; i++)
+            {
+                if (chain[i].Key == barcode)
+                {
+                    // Update existing
+                    chain[i] = new KeyValuePair<string, Product>(barcode, product);
+                    return;
+                }
+            }
+
+            // Append new
+            chain.Add(new KeyValuePair<string, Product>(barcode, product));
+        }
+
+        public bool TryGetValue(string barcode, out Product product)
+        {
+            product = null;
+            int index = GetIndex(barcode);
+
+            foreach (var pair in _buckets[index])
+            {
+                if (pair.Key == barcode)
+                {
+                    product = pair.Value;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Diagnostic: average chain length
+        public double GetAverageChainLength()
+        {
+            double total = 0;
+            int nonEmpty = 0;
+            foreach (var chain in _buckets)
+            {
+                if (chain.Count > 0)
+                {
+                    total += chain.Count;
+                    nonEmpty++;
+                }
+            }
+            return nonEmpty == 0 ? 0 : total / nonEmpty;
+        }
+
+        private int GetIndex(string key) =>
+            Math.Abs(key.GetHashCode()) % _capacity;
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // 2. Linear Probing Hash Table
+    // ───────────────────────────────────────────────────────────────
+    public class LinearProbingHashTable
+    {
+        private readonly (string Key, Product Value)[] _table;
+        private readonly int _capacity;
+        public int _count;
+
+        public LinearProbingHashTable(int capacity = 16384)
+        {
+            _capacity = capacity;
+            _table = new (string, Product)[capacity];
+            _count = 0;
+        }
+
+        public void Add(string barcode, Product product)
+        {
+            if (_count >= _capacity * 0.92) // safety threshold — should resize in real code
+                throw new InvalidOperationException("Hash table is too full. Resize needed.");
+
+            int index = GetInitialIndex(barcode);
+            int start = index;
+
+            do
+            {
+                if (_table[index].Key == null)
+                {
+                    // Empty slot → insert
+                    _table[index] = (barcode, product);
+                    _count++;
+                    return;
+                }
+
+                if (_table[index].Key == barcode)
+                {
+                    // Update existing
+                    _table[index] = (barcode, product);
+                    return;
+                }
+
+                index = (index + 1) % _capacity;
+            } while (index != start);
+
+            throw new InvalidOperationException("Hash table is full.");
+        }
+
+        public bool TryGetValue(string barcode, out Product product)
+        {
+            product = null;
+            int index = GetInitialIndex(barcode);
+            int start = index;
+
+            do
+            {
+                if (_table[index].Key == null)
+                    return false; // empty slot → not found
+
+                if (_table[index].Key == barcode)
+                {
+                    product = _table[index].Value;
+                    return true;
+                }
+
+                index = (index + 1) % _capacity;
+            } while (index != start);
+
+            return false;
+        }
+
+        // Diagnostic: average successful probe length (approximate)
+        public double GetAverageProbeLength()
+        {
+            long totalProbes = 0;
+            int found = 0;
+
+            for (int i = 0; i < _capacity; i++)
+            {
+                if (_table[i].Key != null)
+                {
+                    int probes = 1;
+                    int idx = GetInitialIndex(_table[i].Key);
+                    while (idx != i)
+                    {
+                        probes++;
+                        idx = (idx + 1) % _capacity;
+                    }
+                    totalProbes += probes;
+                    found++;
+                }
+            }
+
+            return found == 0 ? 0 : (double)totalProbes / found;
+        }
+
+        private int GetInitialIndex(string key) =>
+            Math.Abs(key.GetHashCode()) % _capacity;
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Demo / Comparison Program
+    // ───────────────────────────────────────────────────────────────
+    internal class Program
+    {
+        static void Main(string[] args)
+        {
+            const int ITEM_COUNT = 12000;
+            const double targetLoad = 0.85;
+
+            int capacity = (int)(ITEM_COUNT / targetLoad) + 1;
+
+            Console.WriteLine($"Simulating grocery store with ~{ITEM_COUNT} products");
+            Console.WriteLine($"Hash table capacity = {capacity:N0}  (target load ≈ {targetLoad:F2})\n");
+
+            var chaining = new SeparateChainingHashTable(capacity);
+            var linear = new LinearProbingHashTable(capacity);
+
+            // Insert sample data
+            for (int i = 1; i <= ITEM_COUNT; i++)
+            {
+                string barcode = $"BAR{i:D8}";
+                var prod = new Product($"Product {i}", 3.99m + i * 0.07m, 50 + i % 200);
+
+                chaining.Add(barcode, prod);
+                linear.Add(barcode, prod);
+            }
+
+            // Report metrics
+            Console.WriteLine("Separate Chaining:");
+            Console.WriteLine($"  Avg chain length : {chaining.GetAverageChainLength():F3}");
+            Console.WriteLine();
+
+            Console.WriteLine("Linear Probing:");
+            Console.WriteLine($"  Avg probe length : {linear.GetAverageProbeLength():F3}");
+            Console.WriteLine($"  Items stored     : {linear._count}");
+            Console.WriteLine();
+
+            // Quick correctness check
+            string testBarcode = "BAR004567";
+            if (chaining.TryGetValue(testBarcode, out var p1))
+                Console.WriteLine($"Chaining found: {testBarcode} → {p1}");
+            else
+                Console.WriteLine("Chaining: not found");
+
+            if (linear.TryGetValue(testBarcode, out var p2))
+                Console.WriteLine($"Linear  found: {testBarcode} → {p2}");
+        }
+    }
+}
